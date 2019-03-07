@@ -6,7 +6,11 @@
 #include <WiFiUdp.h>
 #include <NTPClient.h>
 #include <ArduinoOTA.h>
-#include "PubSubClient.h"
+extern "C" {
+	#include "freertos/FreeRTOS.h"
+	#include "freertos/timers.h"
+}
+#include <AsyncMqttClient.h>
 // #include <HardwareSerial.h>
 #include "credentials.h"
 #include "FS.h"
@@ -16,7 +20,7 @@
 // HardwareSerial HWSerial2(2); //Pins 4,15
 
 //****************** FUNCTION PROTOTYPES ******************
-
+void initOTA(void);
 
 
 
@@ -32,8 +36,12 @@ void msgRecieved(char* topic, byte* payload, unsigned int length)
 
 //****************** INSTANCES ******************
 WiFiClient espClient;
-PubSubClient client(MQTT_SERVER, MQTT_PORT, msgRecieved, espClient);
+AsyncMqttClient mqttClient;
+TimerHandle_t mqttReconnectTimer;
+TimerHandle_t wifiReconnectTimer;
 // WiFiServer server(80);
+
+
 
 WiFiUDP ntpUDP;
 // You can specify the time server pool and the offset (in seconds, can be
@@ -42,8 +50,8 @@ WiFiUDP ntpUDP;
 #define TIMEZONE 10  //Australia Brisbane GMT+10
 NTPClient timeClient(ntpUDP, "au.pool.ntp.org", 3600*TIMEZONE, 60000);
 
-uint8_t connectionRetries;
-#define CONNECTION_RETRY_TIME 300000
+// uint8_t connectionRetries;
+// #define CONNECTION_RETRY_TIME 300000
 
 bool watchdog_active = false;
 #define WDT_TIMEOUT 3000  //time in ms to trigger the watchdog
@@ -64,8 +72,7 @@ void setup()
 
     // attachInterrupt(SOME_PIN, ISR_FUNCTION, RISING);
 
-    WiFi.onEvent(WiFiEvent); //Handle all the Wifi Events, ie. GotIP, Disconnected
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    initWifi();
     initSpiffs();
     enableWDT();  //This is the core 1 watchdog timer, it's feed in houseKeeping.
 }

@@ -26,19 +26,6 @@
 23 SYSTEM_EVENT_ETH_DISCONNECTED         < ESP32 ethernet phy link down
 24 SYSTEM_EVENT_ETH_GOT_IP               < ESP32 ethernet got IP from connected AP
 25 SYSTEM_EVENT_MAX
-
-
-*Mqtt States
--4 : MQTT_CONNECTION_TIMEOUT             < Server didn't respond within the keepalive time
--3 : MQTT_CONNECTION_LOST                < Network connection was broken
--2 : MQTT_CONNECT_FAILED                 < Network connection failed
--1 : MQTT_DISCONNECTED                   < Client is disconnected cleanly
-0  : MQTT_CONNECTED                      < Client is connected
-1  : MQTT_CONNECT_BAD_PROTOCOL           < Server doesn't support the requested version of MQTT
-2  : MQTT_CONNECT_BAD_CLIENT_ID          < Server rejected the client identifier
-3  : MQTT_CONNECT_UNAVAILABLE            < Server was unable to accept the connection
-4  : MQTT_CONNECT_BAD_CREDENTIALS        < Username/password were rejected
-5  : MQTT_CONNECT_UNAUTHORIZED           < Client was not authorized to connect
 */
 
 //******************** WDT TIMEOUT CALLBACK *******************
@@ -75,65 +62,156 @@ void feedWDT()
 }
 
 //*******************************MQTT**********************************
-void connectMQTT()
+void connectToWifi()
 {
-    if (!client.connected()) {
-        Serial.print("Connecting to MQTT...");
-        Serial.println(MQTT_CLIENT_NAME);
-        if (client.connect(MQTT_CLIENT_NAME, MQTT_USER, MQTT_PASS, STATE_TOPIC, 1, true, "0")) {
-        // if (client.connect(MQTT_CLIENT_NAME, STATE_TOPIC, 1, true, "0")) {                         // MQTT without user/password authentication
-            Serial.println("connected");
-        } else {
-            static int lastMqttState = MQTT_DISCONNECTED;
-            int mqttState = client.state();
-            if(lastMqttState != mqttState){
-              switch (mqttState) {
-                    case MQTT_CONNECTION_TIMEOUT:
-                      logEvent("[WARN]: mqtt, Connection Timeout");
-                      break;
-                  case MQTT_CONNECTION_LOST:
-                       logEvent("[WARN]: mqtt, Connection Lost");
-                       break;
-                   case MQTT_CONNECT_FAILED:
-                      logEvent("[ERR]: mqtt, Connect Failed");
-                      break;
-                  case MQTT_DISCONNECTED:
-                      logEvent("[WARN]: mqtt, Disconnected");
-                      break;
-                  case MQTT_CONNECT_BAD_PROTOCOL:
-                      logEvent("[ERR]: mqtt, Bad Protocol");
-                      break;
-                  case MQTT_CONNECT_BAD_CLIENT_ID:
-                      logEvent("[WARN]: mqtt, Bad Client ID");
-                      break;
-                  case MQTT_CONNECT_UNAVAILABLE:
-                      logEvent("[WARN]: mqtt, unavailable");
-                      break;
-                  case MQTT_CONNECT_BAD_CREDENTIALS:
-                      logEvent("[WARN]: mqtt, Bad Credentials");
-                      break;
-                  case MQTT_CONNECT_UNAUTHORIZED:
-                      logEvent("[WARN]: mqtt, Unauthorized");
-                      break;
-                }
-                lastMqttState = mqttState;
-            }
-            return;
-        }
-    }
-
-    // Publishes an Alive message of the device name and IP address
-    IPAddress myIP = WiFi.localIP();
-    String ipString = String(myIP[0]) + "." + String(myIP[1]) + "." + String(myIP[2]) + "." + String(myIP[3]) + WiFi.RSSI();
-    String aliveMsgStr = String(DEVICE_ID) + "-" + ipString;
-    char aliveMsg[33];
-    aliveMsgStr.toCharArray(aliveMsg, 33);
-    client.publish(LOG_TOPIC, aliveMsg);
-
-    client.publish(STATE_TOPIC, "1");
-
-    client.subscribe(SOME_SUB_TOPIC);
+  //Serial.println("Connecting to Wi-Fi...");
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
+
+void connectToMqtt()
+{
+  //Serial.println("Connecting to MQTT...");
+    mqttClient.connect();
+}
+
+void WiFiEvent(WiFiEvent_t event)
+{
+    Serial.printf("[WiFi-event] event: %d\n", event);
+    switch(event) {
+        case SYSTEM_EVENT_STA_GOT_IP:
+            logEvent("[INFO]: wifi, obtained IP");
+            Serial.println("WiFi connected");
+            Serial.println("IP address: ");
+            Serial.println(WiFi.localIP());
+            connectToMqtt();
+            initOTA();
+            timeClient.begin();
+//
+//         /*************** Setup webserver on the local network ***************/
+//             // if(MDNS.begin("vending")) {
+//             //     Serial.println("Error setting up MDNS responder!");
+//             // }
+//             // /* start Server */
+//             // server.begin();
+            break;
+        case SYSTEM_EVENT_STA_DISCONNECTED:
+            logEvent("[WARN]: wifi, disconnected");
+            xTimerStop(mqttReconnectTimer, 0); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
+		    xTimerStart(wifiReconnectTimer, 0);
+            break;
+    }
+}
+
+void onMqttConnect(bool sessionPresent)
+{
+    IPAddress myIP = WiFi.localIP();
+    String aliveMsgStr = String(myIP[0]) + "." + String(myIP[1]) + "." + String(myIP[2]) + "." + String(myIP[3]) + String(WiFi.RSSI());
+    char aliveMsg[20];
+    aliveMsgStr.toCharArray(aliveMsg, 20);
+    mqttClient.publish(STATE_TOPIC, 0, 1, aliveMsg);  //topic, QOS, retain, message
+    logEvent("[INFO]: mqtt, Connected as " MQTT_CLIENT_NAME);
+
+    mqttClient.subscribe(SOME_SUB_TOPIC, 1);          //topic, QOS
+    logEvent("[INFO]: mqtt, Subscribed: " SOME_SUB_TOPIC);
+}
+
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason)
+{
+    static int8_t lastDisconnectReason = int(AsyncMqttClientDisconnectReason::TCP_DISCONNECTED);
+    if (lastDisconnectReason != int(reason)){
+        switch (reason) {
+            case AsyncMqttClientDisconnectReason::TCP_DISCONNECTED:
+                logEvent("[WARN]: mqtt, TCP disconnect");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_UNACCEPTABLE_PROTOCOL_VERSION:
+                 logEvent("[WARN]: mqtt, Bad Protocol");
+                 break;
+            case AsyncMqttClientDisconnectReason::MQTT_IDENTIFIER_REJECTED:
+                logEvent("[WARN]: mqtt, Bad Client ID");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_SERVER_UNAVAILABLE:
+                logEvent("[WARN]: mqtt, unavailable");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_MALFORMED_CREDENTIALS:
+                logEvent("[WARN]: mqtt, Bad Credentials");
+                break;
+            case AsyncMqttClientDisconnectReason::MQTT_NOT_AUTHORIZED:
+                logEvent("[WARN]: mqtt, Unauthorized");
+                break;
+            case AsyncMqttClientDisconnectReason::TLS_BAD_FINGERPRINT:
+                logEvent("[ERR]: mqtt, Bad Fingerprint");
+                break;
+        }
+        lastDisconnectReason = int(reason);
+    }
+    if (WiFi.isConnected()) {
+      xTimerStart(mqttReconnectTimer, 0);
+    }
+}
+
+// void onMqttSubscribe(uint16_t packetId, uint8_t qos)
+// {
+  //   Serial.println("Subscribe acknowledged.");
+  //   Serial.print("  packetId: ");
+  //   Serial.println(packetId);
+  //   Serial.print("  qos: ");
+  //   Serial.println(qos);
+// }
+//
+// void onMqttUnsubscribe(uint16_t packetId)
+// {
+  //   Serial.println("Unsubscribe acknowledged.");
+  //   Serial.print("  packetId: ");
+  //   Serial.println(packetId);
+// }
+
+void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total)
+{
+    //Serial.println("Publish received.");
+    //Serial.print("  topic: ");
+    //Serial.println(topic);
+    //Serial.print("  qos: ");
+    //Serial.println(properties.qos);
+    //Serial.print("  dup: ");
+    //Serial.println(properties.dup);
+    //Serial.print("  retain: ");
+    //Serial.println(properties.retain);
+    //Serial.print("  len: ");
+    //Serial.println(len);
+    //Serial.print("  index: ");
+    //Serial.println(index);
+    //Serial.print("  total: ");
+    //Serial.println(total);
+}
+
+// void onMqttPublish(uint16_t packetId)
+// {
+    //Serial.println("Publish acknowledged.");
+    //Serial.print("  packetId: ");
+    //Serial.println(packetId);
+// }
+
+void initWifi()
+{
+    mqttReconnectTimer = xTimerCreate("mqttTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
+    wifiReconnectTimer = xTimerCreate("wifiTimer", pdMS_TO_TICKS(5000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
+
+    WiFi.onEvent(WiFiEvent);
+
+    mqttClient.onConnect(onMqttConnect);
+    mqttClient.onDisconnect(onMqttDisconnect);
+    // mqttClient.onSubscribe(onMqttSubscribe);
+    // mqttClient.onUnsubscribe(onMqttUnsubscribe);
+    mqttClient.onMessage(onMqttMessage);
+    // mqttClient.onPublish(onMqttPublish);
+    mqttClient.setClientId(MQTT_CLIENT_NAME);
+    mqttClient.setCredentials(MQTT_USER, MQTT_PASS);
+    mqttClient.setWill(STATE_TOPIC, 1, 1, "0", 0); //const char* topic, uint8_t qos, bool retain, const char* payload = nullptr, size_t length = 0
+    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+
+    connectToWifi();
+}
+
 
 void initOTA()
 {
@@ -192,60 +270,13 @@ void initOTA()
 }
 
 
-//****************************HOUSE KEEPING***********************
-void WiFiEvent(WiFiEvent_t event)
-{
-    Serial.printf("[WiFi-event] event: %d\n", event);
-
-    switch (event) {
-        case SYSTEM_EVENT_STA_GOT_IP:
-            connectionRetries = 0;
-            Serial.println("WiFi connected");
-            Serial.println("IP address: ");
-            Serial.println(WiFi.localIP());
-            connectMQTT();
-            initOTA();
-            timeClient.begin();
-            logEvent("[INFO]: wifi, obtained IP");
-
-        /*************** Setup webserver on the local network ***************/
-            // if(MDNS.begin("vending")) {
-            //     Serial.println("Error setting up MDNS responder!");
-            // }
-            // /* start Server */
-            // server.begin();
-
-            break;
-        case SYSTEM_EVENT_STA_DISCONNECTED:
-            logEvent("[WARN]: wifi, disconnected");
-            Serial.println("WiFi lost connection");
-            connectionRetries = 5;                    //Setup the amount of time to atempt to reconnect to wifi
-            break;
-    }
-}
-
-
 void houseKeeping()
 {
     feedWDT();
-    if(WiFi.status() != WL_CONNECTED && connectionRetries > 0) {
-        static unsigned long lastConnectionAtemptTime = 0;
-        unsigned long timeNow = millis();
-        if(timeNow - lastConnectionAtemptTime > CONNECTION_RETRY_TIME){
-            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-            connectionRetries--;
-            lastConnectionAtemptTime = timeNow;
-        }
-    } else {
-      if (client.state() <= MQTT_DISCONNECTED && WiFi.status() == WL_CONNECTED){
-          connectMQTT();
-      }
-      if (client.state() == MQTT_CONNECTED){
-          client.loop();
-      }
+    if(WiFi.status() == WL_CONNECTED){
       ArduinoOTA.handle();
       timeClient.update();
-
+    }
       /* mDNS stuff ******   listen for client */
         // WiFiClient client = server.available();
         // uint8_t data[30];
@@ -265,5 +296,5 @@ void houseKeeping()
         //         }
         //     }
         // }
-    }
+    // }
 }

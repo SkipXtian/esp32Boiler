@@ -10,6 +10,9 @@ void logEvent(String msg)
     char logMessage[45];
     snprintf(logMessage, sizeof logMessage, "%lu:%s\n", timeClient.getEpochTime(), msg);
     Serial.print(logMessage);
+    if(mqttClient.connected()){
+        mqttClient.publish(LOG_TOPIC, 0, 1, logMessage);
+    }
     // File eventlog = SPIFFS.open("/eventlog.json", "a");
     // eventlog.print(logMessage);
   	// eventlog.close();
