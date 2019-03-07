@@ -1,0 +1,27 @@
+
+//****************** SPIFFS CONFIG & LOGGING ******************
+//logEvent("INFO", "sys", "System setup completed, running", "");
+/******************* Log event ******************
+INPUT: String with format "[TYPE] system: event"
+ie "[INFO]: wifi, obtained IP" INFO/WARN/STAT/ERR
+*/
+void logEvent(String msg)
+{
+    char logMessage[45];
+    snprintf(logMessage, sizeof logMessage, "%lu:%s\n", timeClient.getEpochTime(), msg);
+    Serial.print(logMessage);
+    // File eventlog = SPIFFS.open("/eventlog.json", "a");
+    // eventlog.print(logMessage);
+  	// eventlog.close();
+}
+
+
+
+bool initSpiffs()
+{
+    if (!SPIFFS.begin(true)) {  //Format SPIFF if not already
+        Serial.println("[ERR]: spiffs, unable to mount");
+        return false;
+    }
+    return true;
+}
